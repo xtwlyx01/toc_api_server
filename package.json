@@ -1,0 +1,16 @@
+{
+  "name": "tocodex-signing-relay",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Zero-dependency relay that speaks ToCodex's dynamic HMAC-SHA256 request signing scheme (reverse-engineered from the ToCodex VSCode extension).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check lib/sign.js && node --check lib/headers.js && node --check lib/http-client.js && node --check lib/normalize.js && node --check lib/sse.js && node --check lib/util.js && node --check lib/openai-schema.js && node --check lib/anthropic.js && node --check lib/responses.js",
+    "test": "for f in test/*.test.js; do node \"$f\" || exit 1; done",
+    "sign:demo": "node -e \"const c=require('node:crypto');const ts=Math.floor(Date.now()/1000).toString();const n=c.randomUUID();const p=ts+':'+n+':POST:/v1/chat/completions';const s=c.createHmac('sha256',process.env.TOCODEX_HMAC_SECRET||'tc-hmac-s3cr3t-k3y-2026-tocodex-platform').update(p).digest('hex');console.log({ts,nonce:n,payload:p,sig:s});\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
