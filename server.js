@@ -58,9 +58,6 @@ const CORS_ALLOW_HEADERS =
   "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta";
 const CORS_ALLOW_METHODS = process.env.CORS_ALLOW_METHODS || "GET,POST,PUT,PATCH,DELETE,OPTIONS";
 const UPSTREAM_TIMEOUT_MS = toPositiveInt(process.env.UPSTREAM_TIMEOUT_MS || "600000");
-const UPSTREAM_RETRY_MAX = toNonNegativeInt(process.env.UPSTREAM_RETRY_MAX || "2");
-const UPSTREAM_RETRY_BASE_MS = toPositiveInt(process.env.UPSTREAM_RETRY_BASE_MS || "1000");
-const UPSTREAM_RETRY_MAX_DELAY_MS = toPositiveInt(process.env.UPSTREAM_RETRY_MAX_DELAY_MS || "10000");
 const SESSION_TTL_MS = toPositiveInt(process.env.RESPONSES_SESSION_TTL_MS || "1800000");
 const SESSION_MAX = toPositiveInt(process.env.RESPONSES_SESSION_MAX || "500");
 
@@ -332,6 +329,15 @@ async function callUpstreamChat(apiKey, translatedBody, { taskId } = {}) {
     };
   }
   const bodyBuf = Buffer.from(JSON.stringify(normalized));
+  const headers = buildUpstreamHeaders(CONFIG, {
+    path: upstreamPath,
+    method: "POST",
+    apiKey,
+    taskId,
+    stream: !!normalized.stream,
+    hasBody: true,
+    contentLength: bodyBuf.length,
+  });
 
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -340,101 +346,40 @@ async function callUpstreamChat(apiKey, translatedBody, { taskId } = {}) {
   );
 
   try {
-    for (let attempt = 0; ; attempt++) {
-      const headers = buildUpstreamHeaders(CONFIG, {
-        path: upstreamPath,
-        method: "POST",
-        apiKey,
-        taskId,
-        stream: !!normalized.stream,
-        hasBody: true,
-        contentLength: bodyBuf.length,
-        retryCount: attempt,
-      });
+    const resp = await httpClient.request(upstreamUrl(CONFIG, upstreamPath), {
+      method: "POST",
+      headers,
+      body: bodyBuf,
+      signal: controller.signal,
+      timeoutMs: UPSTREAM_TIMEOUT_MS,
+    });
 
-      const resp = await httpClient.request(upstreamUrl(CONFIG, upstreamPath), {
-        method: "POST",
-        headers,
-        body: bodyBuf,
-        signal: controller.signal,
-        timeoutMs: UPSTREAM_TIMEOUT_MS,
-      });
-
-      if (resp.status === 429 && attempt < UPSTREAM_RETRY_MAX) {
-        await drainAndRetry(resp, attempt, controller.signal);
-        continue;
+    if (resp.status >= 400) {
+      const buf = await httpClient.readAll(resp.body);
+      const text = buf.toString("utf8");
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { error: { message: text || `upstream ${resp.status}` } };
       }
-
-      if (resp.status >= 400) {
-        const buf = await httpClient.readAll(resp.body);
-        const text = buf.toString("utf8");
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch {
-          json = { error: { message: text || `upstream ${resp.status}` } };
-        }
-        return { stream: false, status: resp.status, json, cleanup: () => clearTimeout(timeout) };
-      }
-
-      if (normalized.stream) {
-        return {
-          stream: true,
-          response: { body: resp.body },
-          cleanup: () => clearTimeout(timeout),
-        };
-      }
-
-      const json = await httpClient.readJson(resp.body);
       return { stream: false, status: resp.status, json, cleanup: () => clearTimeout(timeout) };
     }
+
+    if (normalized.stream) {
+      return {
+        stream: true,
+        response: { body: resp.body },
+        cleanup: () => clearTimeout(timeout),
+      };
+    }
+
+    const json = await httpClient.readJson(resp.body);
+    return { stream: false, status: resp.status, json, cleanup: () => clearTimeout(timeout) };
   } catch (e) {
     clearTimeout(timeout);
     throw e;
   }
-}
-
-async function drainAndRetry(resp, attempt, signal) {
-  await httpClient.readAll(resp.body);
-  const delayMs = retryDelayMs(resp.headers && resp.headers["retry-after"], attempt);
-  await sleep(delayMs, signal);
-}
-
-function retryDelayMs(retryAfter, attempt) {
-  const value = Array.isArray(retryAfter) ? retryAfter[0] : retryAfter;
-  if (value) {
-    const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(seconds * 1000, UPSTREAM_RETRY_MAX_DELAY_MS);
-    }
-    const dateMs = Date.parse(value);
-    if (Number.isFinite(dateMs)) {
-      return Math.min(Math.max(0, dateMs - Date.now()), UPSTREAM_RETRY_MAX_DELAY_MS);
-    }
-  }
-  return Math.min(UPSTREAM_RETRY_BASE_MS * 2 ** attempt, UPSTREAM_RETRY_MAX_DELAY_MS);
-}
-
-function sleep(ms, signal) {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject((signal && signal.reason) || new Error("aborted"));
-    };
-    function done() {
-      if (signal) signal.removeEventListener("abort", onAbort);
-      resolve();
-    }
-    if (signal) {
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
 }
 
 // --- Anthropic routes --------------------------------------------------------
@@ -744,12 +689,6 @@ function toPort(value) {
 function toPositiveInt(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) throw new Error(`Invalid positive integer: ${value}`);
-  return Math.floor(number);
-}
-
-function toNonNegativeInt(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) throw new Error(`Invalid non-negative integer: ${value}`);
   return Math.floor(number);
 }
 
