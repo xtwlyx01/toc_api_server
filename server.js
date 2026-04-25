@@ -113,6 +113,11 @@ const server = http.createServer(async (req, res) => {
       upstream: CONFIG.apiUrl.toString(),
       signingScheme: "HMAC-SHA256(secret, `${ts}:${nonce}:${METHOD}:${path}`)",
       signedPaths: CONFIG.signAllPaths ? "*" : Array.from(CONFIG.signedPaths),
+      fixes: {
+        responseUsageTotalTokens: true,
+        anthropicClaudeModelMapping: true,
+        toolSchemaSanitizer: ["strip_dollar_keys", "fill_array_items"],
+      },
       routes: {
         openai_chat: ["POST /v1/chat/completions", "GET /v1/models"],
         openai_responses: ["POST /v1/responses"],
